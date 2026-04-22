@@ -6,3 +6,5 @@ python-multipart
 langgraph
 mcp
 httpx
+pymupdf
+google-generativeai
