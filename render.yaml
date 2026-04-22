@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: ocr-service
+    runtime: docker
+    plan: free
+    dockerfilePath: ./ocr-service/Dockerfile
+    dockerContext: ./ocr-service
+    port: 8000
+    healthCheckPath: /health

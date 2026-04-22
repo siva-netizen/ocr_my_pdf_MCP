@@ -1,0 +1,9 @@
+{
+  "_comment": "Replace /ABSOLUTE/PATH/TO/ with the real path to mcp_server.py on your machine",
+  "mcpServers": {
+    "ocr-service": {
+      "command": "python",
+      "args": ["/ABSOLUTE/PATH/TO/mcp_server.py"]
+    }
+  }
+}
