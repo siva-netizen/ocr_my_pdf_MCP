@@ -127,16 +127,19 @@ def caption_images_node(state: OCRState) -> OCRState:
         logger.warning("No LLM provider available; skipping image captioning")
         return {**state, "image_captions": [], "status": "captions_done"}
 
-    def _caption_one(img: dict) -> dict:
-        return {"page": img["page"], "caption": provider.caption(img["bytes"], img["ext"])}
+    def _caption_one(img: dict) -> dict | None:
+        try:
+            return {"page": img["page"], "caption": provider.caption(img["bytes"], img["ext"])}
+        except Exception as e:
+            logger.error("Caption failed for page %d: %s", img["page"], e)
+            return None
 
-    try:
-        with ThreadPoolExecutor(max_workers=5) as ex:
-            captions = list(ex.map(_caption_one, state["extracted_images"]))
-        return {**state, "image_captions": captions, "status": "captions_done"}
-    except Exception as e:
-        logger.error("Image captioning failed: %s", e)
-        return {**state, "error": str(e), "status": "failed"}
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        results = list(ex.map(_caption_one, state["extracted_images"]))
+
+    captions = [r for r in results if r is not None]
+    logger.info("Captioned %d/%d images", len(captions), len(state["extracted_images"]))
+    return {**state, "image_captions": captions, "status": "captions_done"}
 
 
 def merge_content_node(state: OCRState) -> OCRState:
