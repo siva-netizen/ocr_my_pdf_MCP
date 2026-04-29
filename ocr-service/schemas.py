@@ -4,8 +4,12 @@ from pydantic import BaseModel
 
 
 class OCRState(TypedDict):
-    pdf_bytes: bytes
+    file_bytes: bytes
+    mime_type: str
+    llm_provider: str | None  # e.g. "gemini", "groq" — None falls back to LLM_PROVIDER env var
+    pdf_bytes: bytes | None
     ocr_output_bytes: bytes | None
+    page_texts: list[str] | None
     extracted_text: str | None
     extracted_images: list[dict] | None
     image_captions: list[dict] | None

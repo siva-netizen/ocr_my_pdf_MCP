@@ -3,8 +3,11 @@ uvicorn==0.45.0
 ocrmypdf==16.0.4
 pdfplumber==0.10.3
 python-multipart==0.0.26
-langgraph==0.0.27
+langgraph==0.2.55
 mcp==1.27.0
 httpx==0.28.1
 pymupdf==1.27.2
-google-generativeai==0.8.6
+google-genai==1.14.0
+langchain-groq==0.3.2
+img2pdf==0.5.1
+python-magic==0.4.27
