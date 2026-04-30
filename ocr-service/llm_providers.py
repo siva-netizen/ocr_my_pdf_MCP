@@ -5,27 +5,26 @@ from abc import ABC, abstractmethod
 
 logger = logging.getLogger(__name__)
 
-_CAPTION_PROMPT = """Analyze this image extracted from a document. Follow this exact output format:
+_CAPTION_PROMPT = """Analyze this image extracted from a document.
+
+CRITICAL: Output ONLY the three sections below. No preamble, no steps, no extra text.
 
 [ASCII]
-Reproduce the visual content as ASCII art using these rules:
-- Node-edge graphs: use NodeA ---[label]--> NodeB format
-- Trees: use indented structure with | and -- connectors
-- Matrices/tables: use aligned brackets and spacing
-- Flowcharts: use --> for flow, diamond <condition?> for decisions
-- Equations: preserve mathematical notation exactly as written
-- If image is purely decorative or photo: write NONE
+Reproduce the visual content as ASCII art:
+- Node-edge graphs: NodeA ---[label]--> NodeB
+- Trees: indented structure with | and -- connectors
+- Tables/matrices: aligned columns with spacing
+- Flowcharts: --> for flow, <condition?> for decisions
+- Equations: preserve notation exactly as written
+- Decorative image or photo: write NONE
 
 [DESCRIPTION]
-2-4 sentences explaining what the diagram/image represents conceptually.
-Focus on relationships, flow direction, and key takeaways.
-Do NOT repeat the ASCII — add semantic meaning only.
+2-4 sentences on what the diagram represents conceptually.
+Focus on relationships, flow direction, key takeaways.
+Do NOT repeat the ASCII.
 
 [CONFIDENCE]
-Rate ASCII accuracy: HIGH / MEDIUM / LOW
-HIGH = clean diagram, clear structure, unambiguous
-MEDIUM = some complexity, minor uncertainty
-LOW = dense/overlapping/handwritten, ASCII may be approximate"""
+HIGH"""
 
 
 class CaptionProvider(ABC):

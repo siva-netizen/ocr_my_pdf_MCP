@@ -165,24 +165,34 @@ import re
 
 
 def parse_caption(raw: str) -> dict:
-    """Parse structured [ASCII]/[DESCRIPTION]/[CONFIDENCE] caption into fields."""
+    """Parse structured caption into ascii, description, confidence fields.
+
+    Handles both [TAG] bracket format and ## TAG markdown header format,
+    and confidence values embedded in prose (e.g. 'Rate ASCII accuracy: HIGH').
+    """
+    # Normalise ## ASCII Representation / ## Description / ## Confidence → [TAG]
+    normalised = re.sub(
+        r"^#{1,3}\s*(ASCII(?:\s+Representation)?|DESCRIPTION|CONFIDENCE[^\n]*)\s*$",
+        lambda m: f"[{m.group(1).split()[0].upper()}]",
+        raw, flags=re.M | re.I,
+    )
+
     def _extract(tag: str) -> str:
-        m = re.search(rf"\[{tag}\]\s*(.*?)(?=\[(?:ASCII|DESCRIPTION|CONFIDENCE)|$)", raw, re.S | re.I)
+        m = re.search(
+            rf"\[{tag}\]\s*(.*?)(?=\[(?:ASCII|DESCRIPTION|CONFIDENCE)|$)",
+            normalised, re.S | re.I,
+        )
         return m.group(1).strip() if m else ""
 
     ascii_block = _extract("ASCII")
-    # Treat "NONE" (alone) as no ASCII art
-    ascii_val = None if not ascii_block or ascii_block.upper() == "NONE" else ascii_block
+    ascii_val = None if not ascii_block or re.fullmatch(r"NONE", ascii_block.strip(), re.I) else ascii_block
 
     description = _extract("DESCRIPTION")
 
-    # [CONFIDENCE] may appear as "[CONFIDENCE]\nHIGH" or "[CONFIDENCE: HIGH]"
-    conf_m = re.search(r"\[CONFIDENCE[:\s]*([A-Z]+)\]|^\s*(HIGH|MEDIUM|LOW)\s*$",
-                       _extract("CONFIDENCE") or raw, re.M | re.I)
-    confidence = conf_m.group(1) or conf_m.group(2) if conf_m else "MEDIUM"
-    confidence = confidence.upper() if confidence else "MEDIUM"
-    if confidence not in ("HIGH", "MEDIUM", "LOW"):
-        confidence = "MEDIUM"
+    # Extract HIGH/MEDIUM/LOW anywhere in the confidence block (handles prose like "Rate ... HIGH")
+    conf_block = _extract("CONFIDENCE") or raw
+    conf_m = re.search(r"\b(HIGH|MEDIUM|LOW)\b", conf_block, re.I)
+    confidence = conf_m.group(1).upper() if conf_m else "MEDIUM"
 
     return {"ascii": ascii_val, "description": description, "confidence": confidence}
 
