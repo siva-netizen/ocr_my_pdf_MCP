@@ -6,7 +6,7 @@ from pydantic import BaseModel
 class OCRState(TypedDict):
     file_bytes: bytes
     mime_type: str
-    llm_provider: str | None  # e.g. "gemini", "groq" — None falls back to LLM_PROVIDER env var
+    llm_provider: str | None
     pdf_bytes: bytes | None
     ocr_output_bytes: bytes | None
     page_texts: list[str] | None
@@ -15,13 +15,23 @@ class OCRState(TypedDict):
     image_captions: list[dict] | None
     merged_content: str | None
     page_count: int | None
+    garbled_math_pages: list[int] | None  # 1-indexed pages with suspected garbled equations
     error: str | None
     status: Literal["pending", "ocr_done", "text_extracted", "images_extracted", "captions_done", "merged", "failed"]
+
+
+class CaptionItem(BaseModel):
+    page: int
+    caption: str          # full raw caption preserved
+    ascii: str | None = None
+    description: str = ""
+    confidence: str = "MEDIUM"  # HIGH / MEDIUM / LOW
 
 
 class OCRResponse(BaseModel):
     text: str
     page_count: int
     status: str
-    image_captions: list[dict] | None = None
+    image_captions: list[CaptionItem] | None = None
     merged_content: str | None = None
+    garbled_math_pages: list[int] | None = None  # pages flagged for manual math review

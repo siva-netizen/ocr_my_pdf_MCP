@@ -4,6 +4,7 @@ import logging
 import magic
 from fastapi import FastAPI, UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import PlainTextResponse
 
 from pipeline import pipeline
 from schemas import OCRResponse
@@ -43,6 +44,7 @@ def _invoke(file_bytes: bytes, mime_type: str, llm_provider: str | None = None) 
         "image_captions": None,
         "merged_content": None,
         "page_count": None,
+        "garbled_math_pages": None,
         "error": None,
         "status": "pending",
     })
@@ -55,6 +57,7 @@ def _invoke(file_bytes: bytes, mime_type: str, llm_provider: str | None = None) 
         status=result["status"],
         image_captions=result.get("image_captions"),
         merged_content=result.get("merged_content"),
+        garbled_math_pages=result.get("garbled_math_pages"),
     )
 
 
@@ -81,6 +84,39 @@ async def ocr(file: UploadFile, provider: str | None = None):
 
     logger.info("OCR request: detected_mime=%s size=%d provider=%s", detected, len(file_bytes), provider)
     return await run_in_threadpool(_invoke, file_bytes, detected, provider)
+
+
+@app.post("/ocr/download")
+async def ocr_download(file: UploadFile, provider: str | None = None, format: str = "txt"):
+    """Same as /ocr but returns the result as a downloadable file (txt or json)."""
+    file_bytes = await file.read()
+
+    if len(file_bytes) > MAX_FILE_SIZE:
+        raise HTTPException(status_code=413, detail="File too large. Max 50MB.")
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    detected = _detect_mime(file_bytes)
+    if detected not in SUPPORTED_MIME_TYPES:
+        raise HTTPException(status_code=422, detail=f"Unsupported file type: {detected}")
+
+    result = await run_in_threadpool(_invoke, file_bytes, detected, provider)
+    stem = file.filename.rsplit(".", 1)[0] if file.filename else "output"
+
+    if format == "json":
+        import json
+        from fastapi.responses import Response
+        content = json.dumps(result.model_dump(), indent=2)
+        return Response(content, media_type="application/json",
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.json"'})
+
+    if format == "md":
+        content = result.merged_content or result.text or ""
+        return PlainTextResponse(content, media_type="text/markdown",
+                                 headers={"Content-Disposition": f'attachment; filename="{stem}.md"'})
+
+    content = result.merged_content or result.text or ""
+    return PlainTextResponse(content, headers={"Content-Disposition": f'attachment; filename="{stem}.txt"'})
 
 
 @app.post("/ocr-base64", response_model=OCRResponse)

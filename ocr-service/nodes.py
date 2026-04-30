@@ -86,37 +86,105 @@ def run_ocr_node(state: OCRState) -> OCRState:
         return {**state, "error": str(e), "status": "failed"}
 
 
+def _is_garbled_math(text: str) -> bool:
+    """Heuristic: detect OCR-garbled mathematical notation on a page.
+
+    Signals:
+    - High density of non-ASCII / replacement characters (OCR confusion)
+    - Runs of punctuation/symbols not forming valid words
+    - Subscript/superscript Unicode that Tesseract mangles into random chars
+    """
+    if not text:
+        return False
+    # Ratio of non-alphanumeric, non-space chars — garbled math is symbol-dense
+    non_word = sum(1 for c in text if not c.isalnum() and not c.isspace())
+    if len(text) > 0 and non_word / len(text) > 0.35:
+        return True
+    # Runs of 3+ consecutive punctuation/symbol chars, skipping code-like lines
+    _CODE_LINE = re.compile(r"^\s*(def |class |import |from |#|//|var |let |const |\w+\s*[=({])")
+    for line in text.splitlines():
+        if _CODE_LINE.match(line):
+            continue
+        if re.search(r"[^\w\s]{3,}", line):
+            return True
+    # Common Tesseract math-garble patterns
+    if re.search(r"[a-z]\s*['\u2019\u02bc]\s*\)", text):  # h') or h')
+        return True
+    return False
+
+
 def extract_text_node(state: OCRState) -> OCRState:
-    """Extract plain text and page count from ocr_output_bytes using pdfplumber."""
+    """Extract plain text and page count; flag pages with suspected garbled math."""
     with pdfplumber.open(io.BytesIO(state["ocr_output_bytes"])) as pdf:
-        # Fix #6 — store page_texts list to avoid re-parsing in merge_content_node
         page_texts = [page.extract_text() or "" for page in pdf.pages]
         page_count = len(pdf.pages)
+
+    garbled = [i + 1 for i, t in enumerate(page_texts) if _is_garbled_math(t)]
+    if garbled:
+        logger.warning("Suspected garbled math on pages: %s", garbled)
+
     return {
         **state,
         "page_texts": page_texts,
         "extracted_text": "\n".join(page_texts),
         "page_count": page_count,
+        "garbled_math_pages": garbled or None,
         "status": "text_extracted",
     }
 
 
 def extract_images_node(state: OCRState) -> OCRState:
-    """Extract embedded images from OCR'd PDF bytes using PyMuPDF."""
+    """Extract embedded images from OCR'd PDF bytes using PyMuPDF, recording bbox y0."""
     try:
         doc = fitz.open(stream=state["ocr_output_bytes"], filetype="pdf")
         images = []
         for page_num, page in enumerate(doc, start=1):
+            # Build xref -> bbox map from image placements on the page
+            xref_to_bbox: dict[int, float] = {}
+            for item in page.get_image_info(xrefs=True):
+                xref_to_bbox[item["xref"]] = item["bbox"][1]  # y0
+
             for img in page.get_images(full=True):
                 xref = img[0]
                 data = doc.extract_image(xref)
                 if data["width"] < 100 or data["height"] < 100:
                     continue
-                images.append({"page": page_num, "bytes": data["image"], "ext": data["ext"]})
+                images.append({
+                    "page": page_num,
+                    "bytes": data["image"],
+                    "ext": data["ext"],
+                    "y0": xref_to_bbox.get(xref, 0.0),
+                })
         return {**state, "extracted_images": images, "status": "images_extracted"}
     except Exception as e:
         logger.error("Image extraction failed: %s", e)
         return {**state, "error": str(e), "status": "failed"}
+
+
+import re
+
+
+def parse_caption(raw: str) -> dict:
+    """Parse structured [ASCII]/[DESCRIPTION]/[CONFIDENCE] caption into fields."""
+    def _extract(tag: str) -> str:
+        m = re.search(rf"\[{tag}\]\s*(.*?)(?=\[(?:ASCII|DESCRIPTION|CONFIDENCE)|$)", raw, re.S | re.I)
+        return m.group(1).strip() if m else ""
+
+    ascii_block = _extract("ASCII")
+    # Treat "NONE" (alone) as no ASCII art
+    ascii_val = None if not ascii_block or ascii_block.upper() == "NONE" else ascii_block
+
+    description = _extract("DESCRIPTION")
+
+    # [CONFIDENCE] may appear as "[CONFIDENCE]\nHIGH" or "[CONFIDENCE: HIGH]"
+    conf_m = re.search(r"\[CONFIDENCE[:\s]*([A-Z]+)\]|^\s*(HIGH|MEDIUM|LOW)\s*$",
+                       _extract("CONFIDENCE") or raw, re.M | re.I)
+    confidence = conf_m.group(1) or conf_m.group(2) if conf_m else "MEDIUM"
+    confidence = confidence.upper() if confidence else "MEDIUM"
+    if confidence not in ("HIGH", "MEDIUM", "LOW"):
+        confidence = "MEDIUM"
+
+    return {"ascii": ascii_val, "description": description, "confidence": confidence}
 
 
 def caption_images_node(state: OCRState) -> OCRState:
@@ -131,7 +199,8 @@ def caption_images_node(state: OCRState) -> OCRState:
 
     def _caption_one(img: dict) -> dict | None:
         try:
-            return {"page": img["page"], "caption": provider.caption(img["bytes"], img["ext"])}
+            raw = provider.caption(img["bytes"], img["ext"])
+            return {"page": img["page"], "y0": img.get("y0", 0.0), "caption": raw, **parse_caption(raw)}
         except Exception as e:
             logger.error("Caption failed for page %d: %s", img["page"], e)
             return None
@@ -145,20 +214,54 @@ def caption_images_node(state: OCRState) -> OCRState:
 
 
 def merge_content_node(state: OCRState) -> OCRState:
-    """Merge OCR text and image captions into a unified page-structured string."""
-    try:
-        # Fix #6 — use pre-computed page_texts, no re-parse
-        page_texts = state["page_texts"] or []
-        captions_by_page: dict[int, list[str]] = {}
-        for cap in (state["image_captions"] or []):
-            captions_by_page.setdefault(cap["page"], []).append(cap["caption"])
+    """Merge OCR text and image captions into positional Markdown.
 
+    Text blocks and image captions are sorted by their y0 position on each page,
+    so images appear at their origin position in the document flow.
+    """
+    try:
+        import pdfplumber
+
+        doc_bytes = state["ocr_output_bytes"]
+        captions_by_page: dict[int, list[dict]] = {}
+        for cap in (state["image_captions"] or []):
+            captions_by_page.setdefault(cap["page"], []).append(cap)
+
+        garbled_pages = set(state.get("garbled_math_pages") or [])
         parts = []
-        for i, text in enumerate(page_texts, start=1):
-            parts.append(f"=== PAGE {i} ===")
-            parts.append(f"[TEXT]\n{text}")
-            for j, caption in enumerate(captions_by_page.get(i, []), start=1):
-                parts.append(f"[IMAGE {j} - Page {i}]\n{caption}")
+        with pdfplumber.open(io.BytesIO(doc_bytes)) as pdf:
+            for page_num, page in enumerate(pdf.pages, start=1):
+                header = f"## Page {page_num}"
+                if page_num in garbled_pages:
+                    header += "  ⚠️ _Math equations on this page may be garbled — manual review recommended_"
+                parts.append(header + "\n")
+
+                # Collect text blocks with y position
+                items: list[tuple[float, str]] = []
+                words = page.extract_words()
+                if words:
+                    # Group words into lines by top-y proximity (within 3pt)
+                    lines: list[tuple[float, list[str]]] = []
+                    for w in words:
+                        y = w["top"]
+                        if lines and abs(y - lines[-1][0]) < 3:
+                            lines[-1][1].append(w["text"])
+                        else:
+                            lines.append((y, [w["text"]]))
+                    for y, tokens in lines:
+                        items.append((y, " ".join(tokens)))
+
+                # Collect image captions with y position
+                for idx, cap in enumerate(captions_by_page.get(page_num, []), start=1):
+                    confidence = cap.get("confidence", "MEDIUM")
+                    low_flag = " ⚠️ LOW CONFIDENCE" if confidence == "LOW" else ""
+                    block = f"[IMAGE {idx} - Page {page_num}]{low_flag}\n{cap['caption']}"
+                    items.append((cap.get("y0", 0.0), block))
+
+                # Sort everything by vertical position
+                items.sort(key=lambda x: x[0])
+                parts.extend(text for _, text in items)
+                parts.append("")  # blank line between pages
 
         return {**state, "merged_content": "\n".join(parts), "status": "merged"}
     except Exception as e:
