@@ -36,11 +36,8 @@ class CaptionProvider(ABC):
 
 
 class GeminiProvider(CaptionProvider):
-    def __init__(self) -> None:
+    def __init__(self, api_key: str) -> None:
         from google import genai
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise EnvironmentError("GEMINI_API_KEY is not set")
         self._client = genai.Client(api_key=api_key)
 
     def caption(self, image_bytes: bytes, ext: str) -> str:
@@ -56,12 +53,8 @@ class GeminiProvider(CaptionProvider):
 
 
 class GroqProvider(CaptionProvider):
-    def __init__(self) -> None:
+    def __init__(self, api_key: str) -> None:
         from langchain_groq import ChatGroq
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise EnvironmentError("GROQ_API_KEY is not set")
-        # llama-4-scout supports vision input
         self._llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", api_key=api_key)
 
     def caption(self, image_bytes: bytes, ext: str) -> str:
@@ -74,32 +67,45 @@ class GroqProvider(CaptionProvider):
         return self._llm.invoke([msg]).content
 
 
-# Singleton cache — one instance per provider name per process
-_instances: dict[str, CaptionProvider] = {}
+# Singleton cache keyed by (provider_name, api_key) — per-key instances
+_instances: dict[tuple[str, str], CaptionProvider] = {}
 
 _REGISTRY: dict[str, type[CaptionProvider]] = {
     "gemini": GeminiProvider,
     "groq": GroqProvider,
 }
 
+_ENV_KEYS = {
+    "gemini": "GEMINI_API_KEY",
+    "groq": "GROQ_API_KEY",
+}
 
-def get_provider(name: str | None = None) -> CaptionProvider | None:
+
+def get_provider(name: str | None = None, api_key: str | None = None) -> CaptionProvider | None:
     """
     Resolve a CaptionProvider by name.
-    Falls back to LLM_PROVIDER env var, then 'gemini'.
-    Returns None if the resolved provider cannot be initialised (missing key).
+    api_key: per-request key (from request header). Falls back to env var if not provided.
+    name: falls back to LLM_PROVIDER env var, then 'gemini'.
+    Returns None if no key is available or provider is unknown.
     """
     resolved = (name or os.environ.get("LLM_PROVIDER", "gemini")).lower()
-    if resolved in _instances:
-        return _instances[resolved]
     cls = _REGISTRY.get(resolved)
     if cls is None:
         logger.error("Unknown LLM provider: %s. Available: %s", resolved, list(_REGISTRY))
         return None
+
+    key = api_key or os.environ.get(_ENV_KEYS.get(resolved, ""), "")
+    if not key:
+        logger.warning("No API key for provider '%s'; skipping image captioning", resolved)
+        return None
+
+    cache_key = (resolved, key)
+    if cache_key in _instances:
+        return _instances[cache_key]
     try:
-        instance = cls()
-        _instances[resolved] = instance
+        instance = cls(api_key=key)
+        _instances[cache_key] = instance
         return instance
-    except EnvironmentError as e:
-        logger.warning("Provider '%s' unavailable: %s", resolved, e)
+    except Exception as e:
+        logger.warning("Provider '%s' failed to initialise: %s", resolved, e)
         return None

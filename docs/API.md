@@ -12,15 +12,30 @@ OpenAPI spec: `GET /openapi.json`
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Service liveness check |
+| GET | `/supported-formats` | List accepted file types and size limit |
+| POST | `/validate` | Check a file without running OCR |
 | POST | `/ocr` | OCR a file, returns JSON |
 | POST | `/ocr/download` | OCR a file, returns downloadable file |
 | POST | `/ocr-base64` | OCR a base64-encoded file, returns JSON |
 
 ---
 
+## Authentication
+
+No server-side API key is required. Pass your own VLM provider key per request via headers:
+
+| Header | Provider |
+|---|---|
+| `x-gemini-api-key` | Gemini (default) |
+| `x-groq-api-key` | Groq |
+
+If no header key is sent, the server falls back to its own `GEMINI_API_KEY` / `GROQ_API_KEY` env vars (if set). If neither is available, OCR still runs but image captioning is skipped.
+
+---
+
 ## GET `/health`
 
-Returns service status. Use for Docker/Render health checks.
+Returns service status. Used for Docker/Render health checks.
 
 **Response**
 ```json
@@ -34,6 +49,55 @@ curl http://localhost:8000/health
 
 ---
 
+## GET `/supported-formats`
+
+Returns the file types and size limit accepted by the service. Call this before uploading to check compatibility.
+
+**Response**
+```json
+{
+  "supported": ["BMP image", "GIF image", "JPEG image", "PDF", "PNG image", "TIFF image", "WebP image"],
+  "max_file_size_mb": 50
+}
+```
+
+**Example**
+```bash
+curl http://localhost:8000/supported-formats
+```
+
+---
+
+## POST `/validate`
+
+Check whether a file is supported without running OCR. Reads only the first 4 KB for MIME detection — fast and cheap.
+
+**Request**
+
+| Parameter | Type | Location | Required |
+|---|---|---|---|
+| `file` | file | form-data | ✅ |
+
+**Response — valid file**
+```json
+{"valid": true, "detected_mime": "application/pdf", "filename": "paper.pdf"}
+```
+
+**Response — invalid file**
+```json
+{
+  "valid": false,
+  "reason": "\"report.xlsx\" appears to be a XLSX file, which is not supported. Please upload one of the following: BMP image, GIF image, JPEG image, PDF, PNG image, TIFF image, WebP image."
+}
+```
+
+**Example**
+```bash
+curl -X POST http://localhost:8000/validate -F "file=@document.pdf"
+```
+
+---
+
 ## POST `/ocr`
 
 Upload a file for OCR. Returns structured JSON with extracted text, image captions, and positional Markdown.
@@ -43,7 +107,9 @@ Upload a file for OCR. Returns structured JSON with extracted text, image captio
 | Parameter | Type | Location | Required | Description |
 |---|---|---|---|---|
 | `file` | file | form-data | ✅ | Document to process |
-| `provider` | string | query | ❌ | VLM provider: `gemini` or `groq`. Defaults to `LLM_PROVIDER` env var, then `gemini` |
+| `provider` | string | query | ❌ | `gemini` (default) or `groq` |
+| `x-gemini-api-key` | string | header | ❌ | Your Gemini API key |
+| `x-groq-api-key` | string | header | ❌ | Your Groq API key |
 
 **Supported file types**
 
@@ -56,26 +122,22 @@ Upload a file for OCR. Returns structured JSON with extracted text, image captio
 | BMP | `image/bmp` |
 | GIF | `image/gif` |
 | WebP | `image/webp` |
-| Word (.docx) | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
-| Word (.doc) | `application/msword` |
-| PowerPoint (.pptx) | `application/vnd.openxmlformats-officedocument.presentationml.presentation` |
-| PowerPoint (.ppt) | `application/vnd.ms-powerpoint` |
 
 **Response — `OCRResponse`**
 
 ```json
 {
-  "text": "Full extracted text from all pages joined by newlines...",
+  "text": "Full extracted text from all pages...",
   "page_count": 5,
   "status": "merged",
-  "merged_content": "## Page 1\n\nIntroduction to Graph Neural Networks...\n\n[IMAGE 1 - Page 1]\n[ASCII]\nA ---[msg]--> B\n[DESCRIPTION]\nMessage passing between two nodes.\n[CONFIDENCE: HIGH]\n\n## Page 2\n...",
-  "garbled_math_pages": [3, 4],
+  "merged_content": "## Page 1\n\nIntroduction...\n\n[IMAGE 1 - Page 1]\n[ASCII]\nA ---[msg]--> B\n[DESCRIPTION]\nMessage passing diagram.\n[CONFIDENCE: HIGH]\n\n## Page 3  ⚠️ _Math equations on this page may be garbled_\n...",
+  "garbled_math_pages": [3],
   "image_captions": [
     {
       "page": 1,
-      "caption": "[ASCII]\nA ---[msg]--> B\n[DESCRIPTION]\nMessage passing between two nodes.\n[CONFIDENCE: HIGH]",
+      "caption": "[ASCII]\nA ---[msg]--> B\n[DESCRIPTION]\nMessage passing diagram.\n[CONFIDENCE: HIGH]",
       "ascii": "A ---[msg]--> B",
-      "description": "Message passing between two nodes.",
+      "description": "Message passing diagram.",
       "confidence": "HIGH"
     }
   ]
@@ -86,218 +148,222 @@ Upload a file for OCR. Returns structured JSON with extracted text, image captio
 |---|---|---|
 | `text` | string | Raw OCR text, all pages joined |
 | `page_count` | integer | Total number of pages |
-| `status` | string | Final pipeline status (`merged`, `failed`, etc.) |
-| `merged_content` | string \| null | Positional Markdown with text and images interleaved by vertical position |
-| `garbled_math_pages` | int[] \| null | 1-indexed page numbers where math notation may be garbled by OCR |
-| `image_captions` | CaptionItem[] \| null | Structured per-image captions (see below) |
+| `status` | string | Final pipeline status |
+| `merged_content` | string \| null | Positional Markdown — text and images interleaved by vertical position |
+| `garbled_math_pages` | int[] \| null | 1-indexed pages where math notation may be garbled by OCR |
+| `image_captions` | CaptionItem[] \| null | Structured per-image captions |
 
 **`CaptionItem` fields**
 
 | Field | Type | Description |
 |---|---|---|
-| `page` | integer | Page number the image was found on |
+| `page` | integer | Page number |
 | `caption` | string | Full raw VLM output (preserved) |
-| `ascii` | string \| null | ASCII art reproduction. `null` if image is decorative/photo |
+| `ascii` | string \| null | ASCII art. `null` if image is decorative/photo |
 | `description` | string | 2–4 sentence semantic explanation |
-| `confidence` | string | `HIGH`, `MEDIUM`, or `LOW` — VLM's self-rated ASCII accuracy |
+| `confidence` | string | `HIGH`, `MEDIUM`, or `LOW` |
 
 **Examples**
 
 ```bash
-# Basic OCR
+# With your own Gemini key
 curl -X POST http://localhost:8000/ocr \
-  -F "file=@document.pdf"
+  -H "x-gemini-api-key: AIza..." \
+  -F "file=@paper.pdf"
 
-# Use Groq instead of Gemini for image captioning
+# Use Groq instead
 curl -X POST "http://localhost:8000/ocr?provider=groq" \
-  -F "file=@document.pdf"
+  -H "x-groq-api-key: gsk_..." \
+  -F "file=@paper.pdf"
 
-# OCR a scanned image
+# OCR only (no captioning)
 curl -X POST http://localhost:8000/ocr \
-  -F "file=@scanned_page.png"
+  -F "file=@scanned.png"
 
-# OCR a Word document
+# Save JSON response
 curl -X POST http://localhost:8000/ocr \
-  -F "file=@report.docx"
-
-# Save JSON response to file
-curl -X POST http://localhost:8000/ocr \
-  -F "file=@document.pdf" \
+  -H "x-gemini-api-key: AIza..." \
+  -F "file=@paper.pdf" \
   -o result.json
 ```
 
 **Error responses**
 
-| Status | Condition |
+| Status | Message example |
 |---|---|
-| 400 | Empty file |
-| 413 | File exceeds 50 MB |
-| 422 | Unsupported file type (MIME detected from file content, not filename) |
-| 500 | OCR engine failure, conversion failure, or pipeline error |
+| 422 | `"The uploaded file is empty. Please upload a valid document."` |
+| 422 | `"File is too large (67.3 MB). Maximum allowed size is 50 MB."` |
+| 422 | `"\"report.xlsx\" appears to be a XLSX file, which is not supported. Please upload one of the following: ..."` |
+| 500 | OCR engine or pipeline failure |
 
 ---
 
 ## POST `/ocr/download`
 
-Same processing as `/ocr` but returns the result as a downloadable file instead of JSON. The filename is derived from the uploaded file's name.
+Same processing as `/ocr` but returns the result as a downloadable file. Filename is derived from the uploaded file's name.
 
 **Request**
 
 | Parameter | Type | Location | Required | Description |
 |---|---|---|---|---|
 | `file` | file | form-data | ✅ | Document to process |
-| `provider` | string | query | ❌ | VLM provider: `gemini` or `groq` |
-| `format` | string | query | ❌ | Output format: `txt`, `md`, `json`. Default: `txt` |
+| `provider` | string | query | ❌ | `gemini` or `groq` |
+| `format` | string | query | ❌ | `txt` (default), `md`, or `json` |
+| `x-gemini-api-key` | string | header | ❌ | Your Gemini API key |
+| `x-groq-api-key` | string | header | ❌ | Your Groq API key |
 
 **Output formats**
 
 | `format` | Content-Type | Content | Filename |
 |---|---|---|---|
-| `txt` | `text/plain` | `merged_content` (falls back to `text`) | `{original_name}.txt` |
-| `md` | `text/markdown` | `merged_content` (falls back to `text`) — full positional Markdown | `{original_name}.md` |
-| `json` | `application/json` | Full `OCRResponse` as pretty-printed JSON | `{original_name}.json` |
+| `txt` | `text/plain` | `merged_content` (falls back to `text`) | `{name}.txt` |
+| `md` | `text/markdown` | Positional Markdown with images at origin position | `{name}.md` |
+| `json` | `application/json` | Full `OCRResponse` as pretty-printed JSON | `{name}.json` |
 
 **Examples**
 
 ```bash
-# Download as plain text (curl -O uses server filename, -J uses Content-Disposition header)
-curl -X POST http://localhost:8000/ocr/download \
-  -F "file=@report.pdf" \
-  -O -J
-# saves as: report.txt
-
-# Download as Markdown with images embedded at their original position
+# Download as Markdown (curl -O -J uses server-provided filename)
 curl -X POST "http://localhost:8000/ocr/download?format=md" \
+  -H "x-gemini-api-key: AIza..." \
   -F "file=@paper.pdf" \
   -O -J
 # saves as: paper.md
 
-# Download full JSON response
+# Download as plain text
+curl -X POST http://localhost:8000/ocr/download \
+  -H "x-gemini-api-key: AIza..." \
+  -F "file=@paper.pdf" \
+  -O -J
+# saves as: paper.txt
+
+# Download full JSON
 curl -X POST "http://localhost:8000/ocr/download?format=json" \
+  -H "x-gemini-api-key: AIza..." \
   -F "file=@paper.pdf" \
   -O -J
 # saves as: paper.json
 
-# Specify output filename manually
+# Specify output path manually
 curl -X POST "http://localhost:8000/ocr/download?format=md" \
+  -H "x-gemini-api-key: AIza..." \
   -F "file=@paper.pdf" \
-  -o my_output.md
+  -o ~/Downloads/paper.md
 ```
 
 **Markdown output structure**
 
-The `.md` output interleaves text and images sorted by their vertical position on each page, so the document reads in the same order as the original:
+Text and images are sorted by vertical position on each page — the document reads in the same order as the original PDF:
 
 ```markdown
 ## Page 1
 
-This is the first paragraph extracted from the page.
-Another line of text that appeared below it.
+First paragraph of text on the page.
+Second line of text.
 
 [IMAGE 1 - Page 1]
 [ASCII]
 INPUT --> HIDDEN_LAYER --> OUTPUT
 
 [DESCRIPTION]
-A simple feedforward neural network with one hidden layer.
-Arrows represent weighted connections between neurons.
+A feedforward neural network with one hidden layer.
 
 [CONFIDENCE: HIGH]
 
-Text that appeared below the image in the original document.
+Text that appeared below the image in the original.
 
-## Page 2  ⚠️ _Math equations on this page may be garbled — manual review recommended_
+## Page 3  ⚠️ _Math equations on this page may be garbled — manual review recommended_
 
+## Page 5
+
+[IMAGE 1 - Page 5] ⚠️ LOW CONFIDENCE
+[ASCII]
 ...
-```
-
-Images with low VLM confidence are flagged inline:
-```
-[IMAGE 2 - Page 4] ⚠️ LOW CONFIDENCE
 ```
 
 ---
 
 ## POST `/ocr-base64`
 
-OCR a file sent as a base64-encoded string in a JSON body. Useful for MCP tool integrations and programmatic clients where multipart form uploads are inconvenient.
+OCR a file sent as a base64-encoded string. Useful for MCP tool integrations and programmatic clients where multipart uploads are inconvenient.
 
 **Request body**
 
 ```json
-{
-  "file_base64": "<base64-encoded file bytes>"
-}
+{"file_base64": "<base64-encoded file bytes>"}
 ```
 
-The field `pdf_base64` is also accepted as an alias for `file_base64` (backwards compatibility).
+`pdf_base64` is also accepted as an alias for backwards compatibility.
+
+**Request**
 
 | Parameter | Type | Location | Required | Description |
 |---|---|---|---|---|
-| `file_base64` | string | JSON body | ✅ | Base64-encoded file content |
-| `provider` | string | query | ❌ | VLM provider: `gemini` or `groq` |
+| `file_base64` | string | JSON body | ✅ | Base64-encoded file |
+| `provider` | string | query | ❌ | `gemini` or `groq` |
+| `x-gemini-api-key` | string | header | ❌ | Your Gemini API key |
+| `x-groq-api-key` | string | header | ❌ | Your Groq API key |
 
-**Response**
-
-Same `OCRResponse` structure as `/ocr`.
+**Response:** same `OCRResponse` as `/ocr`.
 
 **Examples**
 
 ```bash
-# Encode and send a PDF
 curl -X POST http://localhost:8000/ocr-base64 \
   -H "Content-Type: application/json" \
-  -d "{\"file_base64\": \"$(base64 -w 0 document.pdf)\"}"
+  -H "x-gemini-api-key: AIza..." \
+  -d "{\"file_base64\": \"$(base64 -w 0 paper.pdf)\"}"
 ```
 
 ```python
 import base64, httpx
 
-with open("document.pdf", "rb") as f:
+with open("paper.pdf", "rb") as f:
     encoded = base64.b64encode(f.read()).decode()
 
 response = httpx.post(
     "http://localhost:8000/ocr-base64",
-    json={"file_base64": encoded}
+    headers={"x-gemini-api-key": "AIza..."},
+    json={"file_base64": encoded},
 )
-data = response.json()
-print(data["merged_content"])
+print(response.json()["merged_content"])
 ```
 
 ```javascript
 const fs = require("fs");
-const encoded = fs.readFileSync("document.pdf").toString("base64");
+const encoded = fs.readFileSync("paper.pdf").toString("base64");
 
 const res = await fetch("http://localhost:8000/ocr-base64", {
   method: "POST",
-  headers: { "Content-Type": "application/json" },
+  headers: {
+    "Content-Type": "application/json",
+    "x-gemini-api-key": "AIza...",
+  },
   body: JSON.stringify({ file_base64: encoded }),
 });
-const data = await res.json();
-console.log(data.merged_content);
+console.log((await res.json()).merged_content);
 ```
 
 **Error responses**
 
-| Status | Condition |
+| Status | Message |
 |---|---|
-| 422 | Missing `file_base64` field |
-| 422 | Invalid base64 string |
-| 413 | Decoded file exceeds 50 MB |
-| 422 | Unsupported file type |
+| 422 | `"Missing 'file_base64' field in request body."` |
+| 422 | `"Invalid base64 encoding. Please re-encode your file and try again."` |
+| 422 | File too large or unsupported type (same friendly messages as `/ocr`) |
 | 500 | Pipeline error |
 
 ---
 
 ## Notes
 
-**MIME detection** — The service detects file type from the file's magic bytes, not the filename or `Content-Type` header. Renaming a `.jpg` to `.pdf` will be detected as an image and processed correctly.
+**MIME detection** — File type is detected from magic bytes, not the filename or `Content-Type` header. A `.pdf` file that is actually a Word document will be rejected with a clear message.
 
-**Image captioning is optional** — If no VLM provider is configured (no `GEMINI_API_KEY` or `GROQ_API_KEY`), the service still returns OCR text. `image_captions` will be an empty list and `merged_content` will contain text only.
+**Image captioning is optional** — If no API key is provided (header or server env var), OCR still runs and returns text. `image_captions` will be an empty list.
 
-**Math garbling** — If `garbled_math_pages` is non-null in the response, those pages contain mathematical notation that Tesseract likely mangled. The affected pages are also flagged inline in `merged_content`. Manual review or a dedicated math OCR tool is recommended for those pages.
+**`garbled_math_pages`** — When non-null, those pages contain mathematical notation that Tesseract likely mangled. They are also flagged inline in `merged_content`. Manual review is recommended for those pages.
 
 **Provider selection priority**
-1. `?provider=` query parameter on the request
-2. `LLM_PROVIDER` environment variable
+1. `?provider=` query param
+2. `LLM_PROVIDER` environment variable on the server
 3. Default: `gemini`

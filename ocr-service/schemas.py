@@ -7,6 +7,7 @@ class OCRState(TypedDict):
     file_bytes: bytes
     mime_type: str
     llm_provider: str | None
+    api_key: str | None          # per-request API key from request header
     pdf_bytes: bytes | None
     ocr_output_bytes: bytes | None
     page_texts: list[str] | None

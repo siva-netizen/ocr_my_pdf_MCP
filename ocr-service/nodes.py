@@ -202,7 +202,7 @@ def caption_images_node(state: OCRState) -> OCRState:
     if not state["extracted_images"]:
         return {**state, "image_captions": [], "status": "captions_done"}
 
-    provider = get_provider(state.get("llm_provider"))
+    provider = get_provider(state.get("llm_provider"), api_key=state.get("api_key"))
     if provider is None:
         logger.warning("No LLM provider available; skipping image captioning")
         return {**state, "image_captions": [], "status": "captions_done"}
