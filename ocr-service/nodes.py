@@ -77,7 +77,9 @@ def run_ocr_node(state: OCRState) -> OCRState:
     input_buf = io.BytesIO(state["pdf_bytes"])
     output_buf = io.BytesIO()
     try:
-        ocrmypdf.ocr(input_buf, output_buf, skip_text=True)
+        # force_ocr=True discards the original (broken/encoded) text layer
+        # and replaces it entirely with Tesseract's OCR output
+        ocrmypdf.ocr(input_buf, output_buf, force_ocr=True)
         return {**state, "ocr_output_bytes": output_buf.getvalue(), "status": "ocr_done"}
     except Exception as e:
         logger.error("OCR failed: %s", e)
