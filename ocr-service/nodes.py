@@ -1,8 +1,5 @@
 import io
 import logging
-import os
-import subprocess
-import tempfile
 from concurrent.futures import ThreadPoolExecutor
 
 import fitz
@@ -30,35 +27,6 @@ def convert_to_pdf_node(state: OCRState) -> OCRState:
         except Exception as e:
             logger.error("Image to PDF conversion failed: %s", e)
             return {**state, "error": "Image conversion failed", "status": "failed"}
-
-    office_exts = {
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-        "application/msword": ".doc",
-        "application/vnd.ms-powerpoint": ".ppt",
-    }
-    if mime in office_exts:
-        ext = office_exts[mime]
-        with tempfile.TemporaryDirectory() as tmpdir:
-            infile = os.path.join(tmpdir, f"input{ext}")
-            with open(infile, "wb") as f:
-                f.write(data)
-            # Fix #11 — catch TimeoutExpired
-            try:
-                result = subprocess.run(
-                    ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", tmpdir, infile],
-                    capture_output=True, timeout=120,
-                )
-            except subprocess.TimeoutExpired:
-                logger.error("LibreOffice conversion timed out for mime=%s", mime)
-                return {**state, "error": "Document conversion timed out", "status": "failed"}
-            # Fix #5 — log stderr internally, don't expose to caller
-            if result.returncode != 0:
-                logger.error("LibreOffice conversion failed: %s", result.stderr.decode())
-                return {**state, "error": "Document conversion failed", "status": "failed"}
-            pdf_path = infile.replace(ext, ".pdf")
-            with open(pdf_path, "rb") as f:
-                return {**state, "pdf_bytes": f.read()}
 
     return {**state, "error": f"Unsupported file type: {mime}", "status": "failed"}
 

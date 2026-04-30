@@ -6,6 +6,22 @@ A stateless FastAPI service that accepts PDF and image files, runs OCR, extracts
 
 ---
 
+## File Structure
+
+```
+ocr-service/
+├── main.py          # App init + router registration
+├── utils.py         # MIME detection, validation, pipeline invocation
+├── routers/
+│   └── ocr.py       # All route handlers (APIRouter)
+├── pipeline.py      # LangGraph graph definition
+├── nodes.py         # Pipeline node functions
+├── llm_providers.py # CaptionProvider ABC + Gemini/Groq implementations
+└── schemas.py       # OCRState, OCRResponse, CaptionItem
+```
+
+---
+
 ## System Diagram
 
 ```
@@ -13,11 +29,11 @@ Client (curl / Claude Desktop / REST)
         │
         ▼
 ┌─────────────────────────────────┐
-│         FastAPI Layer           │  main.py
+│         FastAPI Layer           │  routers/ocr.py
 │  /ocr                           │  • MIME detection (magic bytes)
-│  /ocr/download                  │  • Size + type validation (_validate)
-│  /ocr-base64                    │  • Per-request API key headers
-│  /validate  /supported-formats  │  • Runs pipeline in threadpool
+│  /ocr/download                  │  • Size + type validation
+│  /ocr-base64                    │  • Single x-api-key header
+│  /health  /supported-formats    │  • Runs pipeline in threadpool
 └────────────┬────────────────────┘
              │ OCRState dict
              ▼
@@ -51,7 +67,7 @@ Client (curl / Claude Desktop / REST)
 | `application/pdf` | Pass-through — no conversion |
 | `image/*` (png, jpeg, tiff, bmp, gif, webp) | `img2pdf.convert()` — lossless wrapping |
 
-> Office formats (`.docx`, `.pptx`) are not supported. LibreOffice was removed to keep the Docker image small (~200 MB vs ~800 MB).
+> Office formats (`.docx`, `.pptx`) are not supported. LibreOffice was removed to keep the Docker image small.
 
 ### 2. `validate_pdf_node`
 
@@ -161,7 +177,7 @@ Both providers share the same `_CAPTION_PROMPT`. Provider selection priority:
 2. `LLM_PROVIDER` environment variable
 3. Default: `gemini`
 
-**Per-request API keys** — users pass their own key via request headers (`x-gemini-api-key` or `x-groq-api-key`). The server-level env var (`GEMINI_API_KEY` / `GROQ_API_KEY`) is used as a fallback. The server can run with no keys configured at all — captioning is simply skipped and OCR text is still returned.
+**Per-request API keys** — users pass their own key via a single `x-api-key` request header. The server-level env var (`GEMINI_API_KEY` / `GROQ_API_KEY`) is used as a fallback. The server can run with no keys configured at all — captioning is simply skipped and OCR text is still returned.
 
 Provider instances are cached by `(provider_name, api_key)` tuple — same key reuses the same client instance across requests.
 
@@ -193,7 +209,6 @@ Example error messages:
 |---|---|---|
 | GET | `/health` | Liveness check |
 | GET | `/supported-formats` | List accepted file types and size limit |
-| POST | `/validate` | Check a file without running OCR |
 | POST | `/ocr` | OCR a file, returns JSON |
 | POST | `/ocr/download` | OCR a file, returns downloadable file |
 | POST | `/ocr-base64` | OCR a base64-encoded file, returns JSON |

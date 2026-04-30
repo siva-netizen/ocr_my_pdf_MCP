@@ -16,6 +16,7 @@ curl http://localhost:8000/health
 
 # OCR a PDF
 curl -X POST http://localhost:8000/ocr \
+  -H "x-api-key: your_key" \
   -F "file=@scanned.pdf"
 ```
 
